@@ -58,14 +58,15 @@ func (p *compactionPicker) estimatedCompactionDebt() uint64 {
 		return 0
 	}
 
-	var levelSize uint64
+	var level0Size uint64
 	for _, file := range p.vers.files[0] {
-		levelSize += file.size
+		level0Size += file.size
 	}
 
-	estimatedCompactionDebt := levelSize
-	bytesAddedToNextLevel := levelSize
+	estimatedCompactionDebt := level0Size
+	bytesAddedToNextLevel := level0Size
 
+	var levelSize uint64
 	var nextLevelSize uint64
 	for level := p.baseLevel; level < numLevels - 1; level++ {
 		if nextLevelSize > 0 {
@@ -79,7 +80,13 @@ func (p *compactionPicker) estimatedCompactionDebt() uint64 {
 		}
 
 		if level == p.baseLevel {
-			estimatedCompactionDebt += levelSize
+			// TODO(ryan): This needs to be adjusted to look at last l0 count in l0->lbase compaction.
+			// Multiplier may need adjustments too (already, without l0 count estimation change).
+			// This is more confusing than that. We need to see what the average l0 file count is after l0->lbase compaciton.
+			// It won't always be 0 if the write rate is fast enough, since several memtable will have flushed
+			// to l0 before the l0->lbase finishes.
+			estimatedAverageL0Size := p.opts.L0CompactionThreshold * p.opts.MemTableSize
+			estimatedCompactionDebt += uint64(float64(levelSize) / float64(estimatedAverageL0Size)) * level0Size
 		}
 
 		levelSize += bytesAddedToNextLevel
@@ -98,8 +105,11 @@ func (p *compactionPicker) estimatedCompactionDebt() uint64 {
 	return estimatedCompactionDebt
 }
 
-// estimatedWAmp estimates the write amp per byte that is added to L0.
-func (p *compactionPicker) estimatedWAmp() float64 {
+// compactionDebtMultiplier returns the compaction debt incurred per byte that is
+// added to L0. This is different from write amp because compaction debt only looks
+// at bytes which exceed the max bytes per level. When every non-empty level is
+// full, this is equal to max write amp.
+func (p *compactionPicker) compactionDebtMultiplier() uint64 {
 	if p == nil {
 		return 0
 	}
@@ -111,7 +121,7 @@ func (p *compactionPicker) estimatedWAmp() float64 {
 	// We add memtable size here to account for overflow into the next level.
 	levelSize += uint64(p.opts.MemTableSize)
 
-	estimatedWAmp := 1.0
+	compactionDebtMultiplier := 1.0
 
 	bytesAddedToNextLevel := levelSize
 	var nextLevelSize uint64
@@ -132,7 +142,8 @@ func (p *compactionPicker) estimatedWAmp() float64 {
 			// TODO(ryan): There is probably a better way to estimate this. Maybe we can
 			// look at how many L0 files were compacted in the last L0->Lbase compaction.
 			estimatedAverageL0Size := p.opts.L0CompactionThreshold * p.opts.MemTableSize
-			estimatedWAmp += float64(levelSize) / float64(estimatedAverageL0Size)
+			compactionDebtMultiplier += float64(levelSize) / float64(estimatedAverageL0Size) *
+				float64(bytesAddedToNextLevel) / float64(estimatedAverageL0Size)
 		}
 
 		levelSize += bytesAddedToNextLevel
@@ -144,14 +155,17 @@ func (p *compactionPicker) estimatedWAmp() float64 {
 			}
 
 			levelRatio := float64(nextLevelSize)/float64(levelSize)
-			estimatedWAmp += levelRatio + 1
+			compactionDebtMultiplier += levelRatio + 1
 		} else {
-			// Return because next levels no longer contribute to compaction debt.
-			return float64(estimatedWAmp)
+			// Return because next levels no longer contribute to compaction debt increase.
+			// Compaction debt only increases when bytes overflow into a level. When bytes
+			// don't overflow into the next level, compaction debt remains the same after
+			// that level.
+			return uint64(compactionDebtMultiplier)
 		}
 	}
 
-	return float64(estimatedWAmp)
+	return uint64(compactionDebtMultiplier)
 }
 
 // estimatedMaxWAmp estimates the maximum possible write amp per byte that is

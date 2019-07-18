@@ -173,9 +173,12 @@ type DB struct {
 	closed int32 // updated atomically
 
 	compactionLimiter          *rate.Limiter
+
+	// This are accessed by both flush and compactions and must be read and
+	// written atomically.
 	compactionDebt             uint64
 	pendingFlushCompactionDebt uint64
-	estimatedWAmp              float64
+	compactionDebtMultiplier   uint64
 
 	flushLimiter *rate.Limiter
 

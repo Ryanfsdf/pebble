@@ -686,8 +686,9 @@ func (d *DB) flush1() error {
 	}
 
 	// Refresh compaction debt estimate since flush has been applied.
-	d.pendingFlushCompactionDebt = 0
-	d.compactionDebt = d.mu.versions.picker.estimatedCompactionDebt()
+	atomic.StoreUint64(&d.pendingFlushCompactionDebt, 0)
+	atomic.StoreUint64(&d.compactionDebt, d.mu.versions.picker.estimatedCompactionDebt())
+	atomic.StoreUint64(&d.compactionDebtMultiplier, d.mu.versions.picker.compactionDebtMultiplier())
 
 	flushed := d.mu.mem.queue[:n]
 	d.mu.mem.queue = d.mu.mem.queue[n:]
@@ -812,9 +813,6 @@ func (d *DB) compact1() (err error) {
 		return err
 	}
 
-	// Recompute estimated w-amp since compaction has been applied.
-	d.estimatedWAmp = d.mu.versions.picker.estimatedWAmp()
-
 	d.updateReadStateLocked()
 	d.deleteObsoleteFiles(jobID)
 	return nil
@@ -868,11 +866,11 @@ func (d *DB) runCompaction(c *compaction) (
 	// the threshold.
 	var compactionSlowdownThreshold uint64
 	if c.flushing == nil {
-		compactionSlowdownThreshold =
-			uint64(d.mu.versions.picker.estimatedMaxWAmp() * float64(d.opts.MemTableSize))
+		compactionSlowdownThreshold = uint64(d.mu.versions.picker.estimatedMaxWAmp() *
+			float64(d.opts.MemTableSize))
+		atomic.StoreUint64(&d.compactionDebt, d.mu.versions.picker.estimatedCompactionDebt())
+		atomic.StoreUint64(&d.compactionDebtMultiplier, d.mu.versions.picker.compactionDebtMultiplier())
 	}
-	d.compactionDebt = d.mu.versions.picker.estimatedCompactionDebt()
-	d.estimatedWAmp = d.mu.versions.picker.estimatedWAmp()
 
 	// Release the d.mu lock while doing I/O.
 	// Note the unusual order: Unlock and then Lock.
@@ -1041,7 +1039,7 @@ func (d *DB) runCompaction(c *compaction) (
 			flushAmount := c.bytesIterated - prevBytesIterated
 			prevBytesIterated = c.bytesIterated
 
-			d.pendingFlushCompactionDebt += uint64(d.estimatedWAmp * float64(flushAmount))
+			atomic.AddUint64(&d.pendingFlushCompactionDebt, flushAmount)
 
 			// We slow down memtable flushing when the dirty bytes indicator falls
 			// below the low watermark, which is 105% memtable size. This will only
@@ -1070,9 +1068,14 @@ func (d *DB) runCompaction(c *compaction) (
 				d.flushLimiter.AllowN(time.Now(), int(flushAmount))
 			}
 		} else {
+			compactionDebt := atomic.LoadUint64(&d.compactionDebt)
+			pendingFlushCompactionDebt := atomic.LoadUint64(&d.pendingFlushCompactionDebt)
+			compactionDebtMultiplier := atomic.LoadUint64(&d.compactionDebtMultiplier)
+			flushCompactionDebt := pendingFlushCompactionDebt * compactionDebtMultiplier
+
 			var curCompactionDebt uint64
-			if d.compactionDebt + d.pendingFlushCompactionDebt > c.bytesIterated {
-				curCompactionDebt = d.compactionDebt + d.pendingFlushCompactionDebt - c.bytesIterated
+			if compactionDebt + flushCompactionDebt > c.bytesIterated {
+				curCompactionDebt = compactionDebt + flushCompactionDebt - c.bytesIterated
 			}
 
 			compactAmount := c.bytesIterated - prevBytesIterated
@@ -1104,6 +1107,14 @@ func (d *DB) runCompaction(c *compaction) (
 			}
 
 			prevBytesIterated = c.bytesIterated
+
+
+			if iterCount > 3000 {
+				fmt.Printf("compactionDebt: %d\n", curCompactionDebt)
+				fmt.Printf("maxLevel: %d\n", compactionSlowdownThreshold)
+				iterCount = 0
+			}
+			iterCount++
 		}
 		// TODO(peter,rangedel): Need to incorporate the range tombstones in the
 		// shouldStopBefore decision.
