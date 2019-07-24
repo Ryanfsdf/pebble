@@ -174,11 +174,10 @@ type DB struct {
 
 	compactionLimiter          *rate.Limiter
 
-	// This are accessed by both flush and compactions and must be read and
-	// written atomically.
-	compactionDebt             uint64
-	pendingFlushCompactionDebt uint64
-	compactionDebtMultiplier   uint64
+	// bytesFlushed is the number of bytes flushed in the current flush. This
+	// must be read/written atomically since it is accessed by both the flush
+	// and compaction routines.
+	bytesFlushed uint64
 
 	flushLimiter *rate.Limiter
 

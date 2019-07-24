@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,7 +83,8 @@ func Open(dirname string, opts *Options) (*DB, error) {
 		apply:         d.commitApply,
 		write:         d.commitWrite,
 	})
-	d.compactionLimiter = rate.NewLimiter(rate.Limit(d.opts.MinCompactionRate), d.opts.MinCompactionRate)
+	// Temporarily initialize rate limit to infinity. This will be updated during compaction.
+	d.compactionLimiter = rate.NewLimiter(rate.Limit(math.MaxInt32), math.MaxInt32)
 	d.flushLimiter = rate.NewLimiter(rate.Limit(d.opts.MinFlushRate), d.opts.MinFlushRate)
 	d.mu.nextJobID = 1
 	d.mu.mem.cond.L = &d.mu.Mutex

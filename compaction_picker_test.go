@@ -14,7 +14,7 @@ import (
 	"github.com/petermattis/pebble/internal/datadriven"
 )
 
-func load(d *datadriven.TestData) (*version, *Options, string) {
+func loadVersion(d *datadriven.TestData) (*version, *Options, string) {
 	opts := &Options{}
 	opts.EnsureDefaults()
 
@@ -67,7 +67,7 @@ func TestCompactionPickerLevelMaxBytes(t *testing.T) {
 		func(d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "init":
-				vers, opts, errMsg := load(d)
+				vers, opts, errMsg := loadVersion(d)
 				if errMsg != "" {
 					return errMsg
 				}
@@ -90,7 +90,7 @@ func TestCompactionPickerTargetLevel(t *testing.T) {
 		func(d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "pick":
-				vers, opts, errMsg := load(d)
+				vers, opts, errMsg := loadVersion(d)
 				if errMsg != "" {
 					return errMsg
 				}
@@ -109,16 +109,14 @@ func TestCompactionPickerEstimatedCompactionDebt(t *testing.T) {
 		func(d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "init":
-				vers, opts, errMsg := load(d)
+				vers, opts, errMsg := loadVersion(d)
 				if errMsg != "" {
 					return errMsg
 				}
 				opts.MemTableSize = 1000
 
 				p := newCompactionPicker(vers, opts)
-				return fmt.Sprintf("%d: %d\n",
-					p.estimatedCompactionDebt(),
-					p.compactionDebtMultiplier())
+				return fmt.Sprintf("%d\n", p.estimatedCompactionDebt(0))
 
 			default:
 				return fmt.Sprintf("unknown command: %s", d.Cmd)

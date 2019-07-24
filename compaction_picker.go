@@ -53,111 +53,47 @@ func (p *compactionPicker) compactionNeeded() bool {
 
 // estimatedCompactionDebt estimates the number of bytes which need to be
 // compacted before the LSM tree becomes stable.
-func (p *compactionPicker) estimatedCompactionDebt() uint64 {
+func (p *compactionPicker) estimatedCompactionDebt(l0ExtraSize uint64) uint64 {
 	if p == nil {
 		return 0
 	}
 
+	compactionDebt := totalSize(p.vers.files[0]) + l0ExtraSize
+	bytesAddedToNextLevel := compactionDebt
+
 	var levelSize uint64
-	for _, file := range p.vers.files[0] {
-		levelSize += file.size
-	}
-
-	estimatedCompactionDebt := levelSize
-	bytesAddedToNextLevel := levelSize
-
 	var nextLevelSize uint64
 	for level := p.baseLevel; level < numLevels - 1; level++ {
-		if nextLevelSize > 0 {
+		if level == p.baseLevel {
+			levelSize = totalSize(p.vers.files[level])
+			// predictedL0CompactionSize is the predicted size of the L0 component in the
+			// current or next L0->LBase compaction. This is needed to predict the number
+			// of L0->LBase compactions which will need to occur for the LSM tree to
+			// become stable.
+			predictedL0CompactionSize := uint64(p.opts.L0CompactionThreshold * p.opts.MemTableSize)
+			// The ratio bytesAddedToNextLevel(L0 Size)/predictedL0CompactionSize is the
+			// predicted number of L0->LBase compactions which will need to occur for the
+			// LSM tree to become stable. We multiply this by levelSize(LBase size) to
+			// estimate the compaction debt incurred by LBase in the L0->LBase compactions.
+			compactionDebt += (levelSize * bytesAddedToNextLevel) / predictedL0CompactionSize
+		} else {
+			// Every level after the base level has its level size computed at the
+			// end of the previous loop iteration, so reuse the result.
 			levelSize = nextLevelSize
 			nextLevelSize = 0
-		} else {
-			levelSize = 0
-			for _, file := range p.vers.files[level] {
-				levelSize += file.size
-			}
-		}
-
-		if level == p.baseLevel {
-			estimatedCompactionDebt += levelSize
 		}
 
 		levelSize += bytesAddedToNextLevel
 		bytesAddedToNextLevel = 0
+		nextLevelSize = totalSize(p.vers.files[level + 1])
 		if levelSize > uint64(p.levelMaxBytes[level]) {
 			bytesAddedToNextLevel = levelSize - uint64(p.levelMaxBytes[level])
-			for _, file := range p.vers.files[level + 1] {
-				nextLevelSize += file.size
-			}
-
 			levelRatio := float64(nextLevelSize)/float64(levelSize)
-			estimatedCompactionDebt += uint64(float64(bytesAddedToNextLevel) * (levelRatio + 1))
+			compactionDebt += uint64(float64(bytesAddedToNextLevel) * (levelRatio + 1))
 		}
 	}
 
-	return estimatedCompactionDebt
-}
-
-// compactionDebtMultiplier returns the compaction debt incurred per byte that is
-// added to L0. This is different from write amp because compaction debt only looks
-// at bytes which exceed the max bytes per level. When every non-empty level is
-// full, this is equal to max write amp.
-func (p *compactionPicker) compactionDebtMultiplier() uint64 {
-	if p == nil {
-		return 0
-	}
-
-	var levelSize uint64
-	for _, file := range p.vers.files[0] {
-		levelSize += file.size
-	}
-	// We add memtable size here to account for overflow into the next level.
-	levelSize += uint64(p.opts.MemTableSize)
-
-	compactionDebtMultiplier := 1.0
-
-	bytesAddedToNextLevel := levelSize
-	var nextLevelSize uint64
-	for level := p.baseLevel; level < numLevels - 1; level++ {
-		if nextLevelSize > 0 {
-			levelSize = nextLevelSize
-			nextLevelSize = 0
-		} else {
-			levelSize = 0
-			for _, file := range p.vers.files[level] {
-				levelSize += file.size
-			}
-		}
-
-		if level == p.baseLevel {
-			// We need to use an estimate of average L0 size because the actual L0 size
-			// is very jumpy.
-			// TODO(ryan): There is probably a better way to estimate this. Maybe we can
-			// look at how many L0 files were compacted in the last L0->Lbase compaction.
-			estimatedAverageL0Size := p.opts.L0CompactionThreshold * p.opts.MemTableSize
-			compactionDebtMultiplier += float64(levelSize) / float64(estimatedAverageL0Size)
-		}
-
-		levelSize += bytesAddedToNextLevel
-		bytesAddedToNextLevel = 0
-		if levelSize > uint64(p.levelMaxBytes[level]) {
-			bytesAddedToNextLevel = levelSize - uint64(p.levelMaxBytes[level])
-			for _, file := range p.vers.files[level + 1] {
-				nextLevelSize += file.size
-			}
-
-			levelRatio := float64(nextLevelSize)/float64(levelSize)
-			compactionDebtMultiplier += levelRatio + 1
-		} else {
-			// Return because next levels no longer contribute to compaction debt increase.
-			// Compaction debt only increases when bytes overflow into a level. When bytes
-			// don't overflow into the next level, compaction debt remains the same after
-			// that level.
-			return uint64(compactionDebtMultiplier)
-		}
-	}
-
-	return uint64(compactionDebtMultiplier)
+	return compactionDebt
 }
 
 // estimatedMaxWAmp estimates the maximum possible write amp per byte that is

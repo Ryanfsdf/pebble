@@ -121,10 +121,10 @@ func runSync(cmd *cobra.Command, args []string) {
 					time.Duration(elapsed.Seconds()+0.5)*time.Second,
 					float64(h.TotalCount())/tick.Elapsed.Seconds(),
 					float64(n-lastBytes)/(1024.0*1024.0)/tick.Elapsed.Seconds(),
-					time.Duration(h.ValueAtQuantile(50)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(95)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(99)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(100)).Seconds()*1000,
+					time.Duration(h.ValueAtQuantile(50)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(95)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(99)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(100)).Seconds()*1000000,
 				)
 				lastBytes = n
 			})
@@ -139,10 +139,10 @@ func runSync(cmd *cobra.Command, args []string) {
 					float64(h.TotalCount())/elapsed.Seconds(),
 					float64(atomic.LoadUint64(&bytes)/(1024.0*1024.0))/elapsed.Seconds(),
 					time.Duration(h.Mean()).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(50)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(95)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(99)).Seconds()*1000,
-					time.Duration(h.ValueAtQuantile(100)).Seconds()*1000)
+					time.Duration(h.ValueAtQuantile(50)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(95)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(99)).Seconds()*1000000,
+					time.Duration(h.ValueAtQuantile(100)).Seconds()*1000000)
 			})
 		},
 	})

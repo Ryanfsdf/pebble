@@ -18,6 +18,7 @@ import (
 
 	"github.com/petermattis/pebble/internal/base"
 	"github.com/petermattis/pebble/internal/rangedel"
+	"github.com/petermattis/pebble/internal/rate"
 	"github.com/petermattis/pebble/sstable"
 	"github.com/petermattis/pebble/vfs"
 )
@@ -685,10 +686,8 @@ func (d *DB) flush1() error {
 		return err
 	}
 
-	// Refresh compaction debt estimate since flush has been applied.
-	atomic.StoreUint64(&d.pendingFlushCompactionDebt, 0)
-	atomic.StoreUint64(&d.compactionDebt, d.mu.versions.picker.estimatedCompactionDebt())
-	atomic.StoreUint64(&d.compactionDebtMultiplier, d.mu.versions.picker.compactionDebtMultiplier())
+	// Refresh bytes flushed count.
+	atomic.StoreUint64(&d.bytesFlushed, 0)
 
 	flushed := d.mu.mem.queue[:n]
 	d.mu.mem.queue = d.mu.mem.queue[n:]
@@ -858,20 +857,6 @@ func (d *DB) runCompaction(c *compaction) (
 
 	snapshots := d.mu.snapshots.toSlice()
 
-	// compactionSlowdownThreshold is the low watermark for compaction debt. If compaction
-	// debt is below this threshold, we slow down compactions. If compaction debt is above
-	// this threshold, we let compactions continue as fast as possible. We want to keep
-	// compaction debt as low as possible to match the speed of flushes. This threshold
-	// is set so that a single flush cannot contribute enough compaction debt to overshoot
-	// the threshold.
-	var compactionSlowdownThreshold uint64
-	if c.flushing == nil {
-		compactionSlowdownThreshold = uint64(d.mu.versions.picker.estimatedMaxWAmp() *
-			float64(d.opts.MemTableSize))
-		atomic.StoreUint64(&d.compactionDebt, d.mu.versions.picker.estimatedCompactionDebt())
-		atomic.StoreUint64(&d.compactionDebtMultiplier, d.mu.versions.picker.compactionDebtMultiplier())
-	}
-
 	// Release the d.mu lock while doing I/O.
 	// Note the unusual order: Unlock and then Lock.
 	d.mu.Unlock()
@@ -1019,6 +1004,10 @@ func (d *DB) runCompaction(c *compaction) (
 	totalBytes := d.memTableTotalBytes()
 	refreshDirtyBytesThreshold := uint64(d.opts.MemTableSize * 5 / 100)
 
+	var compactionSlowdownThreshold uint64
+	var totalCompactionDebt uint64
+	var estimatedMaxWAmp float64
+
 	for key, val := iter.First(); key != nil; key, val = iter.Next() {
 		// Slow down memtable flushing to match fill rate.
 		if c.flushing != nil {
@@ -1039,7 +1028,7 @@ func (d *DB) runCompaction(c *compaction) (
 			flushAmount := c.bytesIterated - prevBytesIterated
 			prevBytesIterated = c.bytesIterated
 
-			atomic.AddUint64(&d.pendingFlushCompactionDebt, flushAmount)
+			atomic.StoreUint64(&d.bytesFlushed, c.bytesIterated)
 
 			// We slow down memtable flushing when the dirty bytes indicator falls
 			// below the low watermark, which is 105% memtable size. This will only
@@ -1068,15 +1057,32 @@ func (d *DB) runCompaction(c *compaction) (
 				d.flushLimiter.AllowN(time.Now(), int(flushAmount))
 			}
 		} else {
-			compactionDebt := atomic.LoadUint64(&d.compactionDebt)
-			pendingFlushCompactionDebt := atomic.LoadUint64(&d.pendingFlushCompactionDebt)
-			compactionDebtMultiplier := atomic.LoadUint64(&d.compactionDebtMultiplier)
-			flushCompactionDebt := pendingFlushCompactionDebt * compactionDebtMultiplier
+			bytesFlushed := atomic.LoadUint64(&d.bytesFlushed)
+
+			if iterCount >= 1000 || c.bytesIterated > refreshDirtyBytesThreshold {
+				d.mu.Lock()
+				estimatedMaxWAmp = d.mu.versions.picker.estimatedMaxWAmp()
+				// compactionSlowdownThreshold is the low watermark for compaction debt. If compaction
+				// debt is below this threshold, we slow down compactions. If compaction debt is above
+				// this threshold, we let compactions continue as fast as possible. We want to keep
+				// compaction debt as low as possible to match the speed of flushes. This threshold
+				// is set so that a single flush cannot contribute enough compaction debt to overshoot
+				// the threshold.
+				compactionSlowdownThreshold = uint64(estimatedMaxWAmp * float64(d.opts.MemTableSize))
+				totalCompactionDebt = d.mu.versions.picker.estimatedCompactionDebt(bytesFlushed)
+				d.mu.Unlock()
+				refreshDirtyBytesThreshold = c.bytesIterated + uint64(d.opts.MemTableSize*5/100)
+				iterCount = 0
+			}
+			iterCount++
 
 			var curCompactionDebt uint64
-			if compactionDebt + flushCompactionDebt > c.bytesIterated {
-				curCompactionDebt = compactionDebt + flushCompactionDebt - c.bytesIterated
+			if totalCompactionDebt > c.bytesIterated {
+				curCompactionDebt = totalCompactionDebt - c.bytesIterated
 			}
+
+			// Set the minimum compaction rate to match the minimum flush rate.
+			d.compactionLimiter.SetLimit(rate.Limit(float64(d.opts.MinFlushRate) * estimatedMaxWAmp))
 
 			compactAmount := c.bytesIterated - prevBytesIterated
 			// We slow down compactions when the compaction debt falls below the slowdown

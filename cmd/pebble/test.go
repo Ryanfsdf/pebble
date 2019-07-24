@@ -234,7 +234,7 @@ func runTest(dir string, t test) {
 	var wg sync.WaitGroup
 	t.init(db, &wg)
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(time.Second/10)
 	defer ticker.Stop()
 
 	done := make(chan os.Signal, 3)
